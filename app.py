@@ -1,7 +1,5 @@
 """
 app.py — Servidor Flask para el Albarán de Solicitud de Radioanálisis
-CIEMAT URAyVR — L104-RG01
-
 Versión: SQLite (sin SQL Server, funciona en cualquier hosting)
 
 Requisitos:
@@ -23,18 +21,12 @@ CORS(app, supports_credentials=True)
 
 # ─────────────────────────────────────────────
 #  SEGURIDAD — Clave de sesión y contraseña admin
-#  Se configuran mediante variables de entorno.
-#  Si no se definen, se generan valores aleatorios
-#  en cada arranque (sesiones no persistentes entre reinicios).
 # ─────────────────────────────────────────────
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 ADMIN_PASSWORD  = os.environ.get('ADMIN_PASSWORD', 'ciemat2024')
 
 # ─────────────────────────────────────────────
 #  RUTA DE LA BASE DE DATOS
-#  Auto-detecta Railway y usa /data (volumen persistente).
-#  Localmente usa el directorio de trabajo.
-#  Se puede sobreescribir con la variable DB_PATH.
 # ─────────────────────────────────────────────
 _en_railway = bool(
     os.environ.get('RAILWAY_ENVIRONMENT') or
@@ -44,7 +36,6 @@ _en_railway = bool(
 _default_db = '/data/ciemat_radioanalisis.db' if _en_railway else 'ciemat_radioanalisis.db'
 DB_PATH = os.environ.get('DB_PATH', _default_db)
 
-# Crear directorio si no existe (necesario en Railway la primera vez)
 _db_dir = os.path.dirname(DB_PATH)
 if _db_dir:
     os.makedirs(_db_dir, exist_ok=True)
@@ -52,7 +43,7 @@ if _db_dir:
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row          # permite acceder por nombre de columna
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -91,15 +82,152 @@ def init_db():
             ref_base    TEXT,
             FOREIGN KEY (albaran_id) REFERENCES Albaranes(id) ON DELETE CASCADE
         );
+
+        -- ── NUEVA TABLA: datos específicos según el tipo de muestra ──
+        -- Todos los campos son opcionales (NULL) según el tipo.
+        -- grupo: número de grupo interno (aire=4/5, suelo=12, agua=6-9, etc.)
+        CREATE TABLE IF NOT EXISTS DatosMuestra (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            albaran_id              INTEGER NOT NULL UNIQUE,
+            grupo                   INTEGER,
+            -- Campos comunes a varios tipos
+            fecha_inicio            TEXT,
+            fecha_final             TEXT,
+            -- Aire / Aerosol (grupos 4,5) y Carbón (grupos 1,2,3)
+            volumen                 TEXT,
+            volumen_unit            TEXT,
+            peso_filtro             TEXT,
+            peso_filtro_unit        TEXT,
+            -- Suelo/Sedimento (grupo 12) y Biota (grupos 10,11)
+            muestra_enviada         TEXT,
+            muestra_enviada_unit    TEXT,
+            superficie_enviada      TEXT,
+            superficie_enviada_unit TEXT,
+            preparada               INTEGER DEFAULT 0,
+            peso_humedo             TEXT,
+            peso_humedo_unit        TEXT,
+            peso_seco               TEXT,
+            peso_seco_unit          TEXT,
+            peso_450                TEXT,
+            peso_450_unit           TEXT,
+            peso_650                TEXT,
+            peso_650_unit           TEXT,
+            -- Agua (grupos 6-9) y Agua de lluvia (grupo 13)
+            acidulada               INTEGER DEFAULT 0,
+            volumen_agua            TEXT,
+            volumen_agua_unit       TEXT,
+            agua_batea              TEXT,
+            agua_batea_unit         TEXT,
+            -- Carbón: agua retenida
+            agua_retenida           TEXT,
+            agua_retenida_unit      TEXT,
+            FOREIGN KEY (albaran_id) REFERENCES Albaranes(id) ON DELETE CASCADE
+        );
     """)
     conn.commit()
     conn.close()
 
-# ─────────────────────────────────────────────
-#  INICIALIZACIÓN AL IMPORTAR EL MÓDULO
-#  Necesario para gunicorn/wsgi (no pasa por __main__)
-# ─────────────────────────────────────────────
+
 init_db()
+
+
+# ─────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────
+
+def _guardar_datos_muestra(cursor, albaran_id, dm):
+    """Inserta o reemplaza los datos de muestra de un albarán."""
+    if not dm:
+        return
+    cursor.execute("""
+        INSERT INTO DatosMuestra (
+            albaran_id, grupo,
+            fecha_inicio, fecha_final,
+            volumen, volumen_unit,
+            peso_filtro, peso_filtro_unit,
+            muestra_enviada, muestra_enviada_unit,
+            superficie_enviada, superficie_enviada_unit,
+            preparada,
+            peso_humedo, peso_humedo_unit,
+            peso_seco, peso_seco_unit,
+            peso_450, peso_450_unit,
+            peso_650, peso_650_unit,
+            acidulada,
+            volumen_agua, volumen_agua_unit,
+            agua_batea, agua_batea_unit,
+            agua_retenida, agua_retenida_unit
+        ) VALUES (
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+        )
+        ON CONFLICT(albaran_id) DO UPDATE SET
+            grupo                   = excluded.grupo,
+            fecha_inicio            = excluded.fecha_inicio,
+            fecha_final             = excluded.fecha_final,
+            volumen                 = excluded.volumen,
+            volumen_unit            = excluded.volumen_unit,
+            peso_filtro             = excluded.peso_filtro,
+            peso_filtro_unit        = excluded.peso_filtro_unit,
+            muestra_enviada         = excluded.muestra_enviada,
+            muestra_enviada_unit    = excluded.muestra_enviada_unit,
+            superficie_enviada      = excluded.superficie_enviada,
+            superficie_enviada_unit = excluded.superficie_enviada_unit,
+            preparada               = excluded.preparada,
+            peso_humedo             = excluded.peso_humedo,
+            peso_humedo_unit        = excluded.peso_humedo_unit,
+            peso_seco               = excluded.peso_seco,
+            peso_seco_unit          = excluded.peso_seco_unit,
+            peso_450                = excluded.peso_450,
+            peso_450_unit           = excluded.peso_450_unit,
+            peso_650                = excluded.peso_650,
+            peso_650_unit           = excluded.peso_650_unit,
+            acidulada               = excluded.acidulada,
+            volumen_agua            = excluded.volumen_agua,
+            volumen_agua_unit       = excluded.volumen_agua_unit,
+            agua_batea              = excluded.agua_batea,
+            agua_batea_unit         = excluded.agua_batea_unit,
+            agua_retenida           = excluded.agua_retenida,
+            agua_retenida_unit      = excluded.agua_retenida_unit
+    """, (
+        albaran_id,
+        dm.get('grupo'),
+        dm.get('fechaInicio') or None,
+        dm.get('fechaFinal')  or None,
+        dm.get('volumen'),
+        dm.get('volumenUnit'),
+        dm.get('pesoFiltro'),
+        dm.get('pesoFiltroUnit'),
+        dm.get('muestraEnviada'),
+        dm.get('muestraEnviadaUnit'),
+        dm.get('superficieEnviada'),
+        dm.get('superficieEnviadaUnit'),
+        1 if dm.get('preparada') else 0,
+        dm.get('pesoHumedo'),
+        dm.get('pesoHumedoUnit'),
+        dm.get('pesoSeco'),
+        dm.get('pesoSecoUnit'),
+        dm.get('peso450'),
+        dm.get('peso450Unit'),
+        dm.get('peso650'),
+        dm.get('peso650Unit'),
+        1 if dm.get('acidulada') else 0,
+        dm.get('volumenAgua'),
+        dm.get('volumenAguaUnit'),
+        dm.get('aguaBatea'),
+        dm.get('aguaBateaUnit'),
+        dm.get('aguaRetenida'),
+        dm.get('aguaRetenidaUnit'),
+    ))
+
+
+def _leer_datos_muestra(cursor, albaran_id):
+    """Devuelve los datos de muestra de un albarán como dict, o None."""
+    cursor.execute(
+        "SELECT * FROM DatosMuestra WHERE albaran_id=?", (albaran_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return dict(row)
 
 
 # ─────────────────────────────────────────────
@@ -134,8 +262,6 @@ def index():
 
 @app.route('/historial')
 def historial():
-    # El control de acceso lo gestiona el JS del cliente
-    # consultando /api/admin/check para no exponer lógica en el servidor
     return send_from_directory('.', 'historial.html')
 
 
@@ -178,8 +304,9 @@ def crear_albaran():
             d.get('incidencias')
         ))
 
-        albaran_id = cursor.lastrowid     # equivalente a OUTPUT INSERTED.id
+        albaran_id = cursor.lastrowid
 
+        # ── Análisis ──
         for a in d.get('analisis', []):
             if a.get('analisis'):
                 cursor.execute("""
@@ -196,6 +323,9 @@ def crear_albaran():
                     a.get('deTanto', ''),
                     a.get('refBase', '')
                 ))
+
+        # ── Datos de muestra (nuevo) ──
+        _guardar_datos_muestra(cursor, albaran_id, d.get('datosMuestra'))
 
         conn.commit()
         conn.close()
@@ -244,6 +374,7 @@ def actualizar_albaran(albaran_id):
             albaran_id
         ))
 
+        # ── Análisis ──
         cursor.execute("DELETE FROM Analisis WHERE albaran_id=?", (albaran_id,))
         for a in d.get('analisis', []):
             if a.get('analisis'):
@@ -261,6 +392,9 @@ def actualizar_albaran(albaran_id):
                     a.get('deTanto', ''),
                     a.get('refBase', '')
                 ))
+
+        # ── Datos de muestra (nuevo) ──
+        _guardar_datos_muestra(cursor, albaran_id, d.get('datosMuestra'))
 
         conn.commit()
         conn.close()
@@ -293,6 +427,9 @@ def obtener_albaran(albaran_id):
             (albaran_id,)
         )
         albaran['analisis'] = [dict(r) for r in cursor.fetchall()]
+
+        # ── Datos de muestra (nuevo) ──
+        albaran['datosMuestra'] = _leer_datos_muestra(cursor, albaran_id)
 
         conn.close()
         return jsonify(albaran)
@@ -350,7 +487,6 @@ def listar_albaranes():
         )
         total = cursor.fetchone()[0]
 
-        # SQLite usa LIMIT … OFFSET (en vez de OFFSET … FETCH)
         cursor.execute(f"""
             SELECT id, ref_ura, cliente, ref_cliente, tipo_muestra,
                    pto_muestreo, fecha_recepcion, fecha_creacion, fecha_modificacion
@@ -377,13 +513,13 @@ def eliminar_albaran(albaran_id):
     try:
         conn   = get_conn()
         cursor = conn.cursor()
-        # CASCADE borra Analisis automáticamente (PRAGMA foreign_keys=ON)
         cursor.execute("DELETE FROM Albaranes WHERE id=?", (albaran_id,))
         conn.commit()
         conn.close()
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/ver-datos')
 def ver_datos():
@@ -393,9 +529,13 @@ def ver_datos():
     html = "<h2>Albaranes guardados</h2><table border='1'>"
     html += "<tr><th>ID</th><th>Ref URA</th><th>Cliente</th><th>Tipo muestra</th><th>Fecha recepción</th><th>Creado</th></tr>"
     for row in albaranes:
-        html += f"<tr><td>{row['id']}</td><td>{row['ref_ura']}</td><td>{row['cliente']}</td><td>{row['tipo_muestra']}</td><td>{row['fecha_recepcion']}</td><td>{row['fecha_creacion']}</td></tr>"
+        html += (f"<tr><td>{row['id']}</td><td>{row['ref_ura']}</td>"
+                 f"<td>{row['cliente']}</td><td>{row['tipo_muestra']}</td>"
+                 f"<td>{row['fecha_recepcion']}</td><td>{row['fecha_creacion']}</td></tr>")
     html += "</table>"
     return html
+
+
 # ─────────────────────────────────────────────
 #  ARRANQUE
 # ─────────────────────────────────────────────
